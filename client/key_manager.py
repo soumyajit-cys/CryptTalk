@@ -1,4 +1,5 @@
 import os
+from cryptography.hazmat.primitives import serialization
 from crypto_utils import generate_ecdh_keypair, serialize_public_key
 
 KEY_FILE = "client_private.pem"
