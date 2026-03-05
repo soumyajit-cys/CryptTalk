@@ -1,17 +1,18 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from models import *
 from auth import AuthManager
 from key_store import KeyStore
-from message_store import MessageStore
+from connection_manager import ConnectionManager
+import json
 
 app = FastAPI()
 
 auth_manager = AuthManager()
 key_store = KeyStore()
-message_store = MessageStore()
+manager = ConnectionManager()
 
 # ---------------------------
-# User Registration
+# Registration
 # ---------------------------
 
 @app.post("/register")
@@ -30,39 +31,51 @@ def login(req: LoginRequest):
     return {"token": token}
 
 # ---------------------------
-# Get Public Key
+# Public Key Retrieval
 # ---------------------------
 
 @app.get("/public_key/{username}")
 def get_public_key(username: str):
     key = key_store.get_key(username)
-    if not key:
-        raise HTTPException(status_code=404, detail="User not found")
     return {"public_key": key}
 
-# ---------------------------
-# Send Encrypted Message
-# ---------------------------
 
-@app.post("/send")
-def send_message(msg: MessageRequest, token: str = Header(...)):
-    sender = auth_manager.validate_token(token)
+# ===========================
+# 🔥 WebSocket Endpoint
+# ===========================
 
-    if not sender or sender != msg.from_user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+@app.websocket("/ws/{token}")
+async def websocket_endpoint(websocket: WebSocket, token: str):
 
-    message_store.store_message(msg.dict())
-    return {"status": "sent"}
-
-# ---------------------------
-# Retrieve Messages
-# ---------------------------
-
-@app.get("/messages")
-def get_messages(token: str = Header(...)):
     username = auth_manager.validate_token(token)
     if not username:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        await websocket.close()
+        return
 
-    messages = message_store.get_messages_for_user(username)
-    return messages
+    await manager.connect(username, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+
+            # message format:
+            # {
+            #   "to_user": "bob",
+            #   "nonce": "...",
+            #   "ciphertext": "...",
+            #   "dh_pub": "..."
+            # }
+
+            recipient = message["to_user"]
+
+            # Relay encrypted payload ONLY
+            await manager.send_to_user(recipient, {
+                "from_user": username,
+                "nonce": message["nonce"],
+                "ciphertext": message["ciphertext"],
+                "dh_pub": message.get("dh_pub")
+            })
+
+    except WebSocketDisconnect:
+        manager.disconnect(username)
